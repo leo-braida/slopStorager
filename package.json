@@ -1,17 +1,20 @@
 {
-  "name": "analysis",
+  "name": "slopStorager",
   "version": "1.0.0",
   "description": "",
   "type": "module",
-  "main": "main.js",
+  "main": "src/main.js",
   "scripts": {
-    "start": "node main.js",
-    "analyze": "node analyze.js",
+    "start": "node src/main.js",
+    "analyze": "node src/analyze.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "express": "^5.1.0",
+    "mongodb": "^6.16.0",
+    "multer": "^2.0.0",
     "npm-name": "^8.1.1"
   }
 }

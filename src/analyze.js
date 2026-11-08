@@ -4,7 +4,39 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DEFAULT_DATABASE_PATH = path.join(__dirname, 'database.jsonl');
+const DEFAULT_DATABASE_PATH = path.join(__dirname, '..', 'database.jsonl');
+
+/**
+ * Parses raw JSONL content and returns package hallucination counts sorted descending.
+ * @param {string} content - Raw JSONL content string
+ * @returns {{ counts: Array<[string, number]>, validLines: number }}
+ */
+export function parseJsonlContent(content) {
+  const lines = content.split(/\r?\n/);
+  const counts = {};
+  let validLines = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      validLines++;
+      if (Array.isArray(obj.modulenotfound)) {
+        for (const rawModule of obj.modulenotfound) {
+          if (typeof rawModule !== 'string') continue;
+          const cleanName = rawModule.replace(/^['"]|['"]$/g, '').trim();
+          if (!cleanName) continue;
+          counts[cleanName] = (counts[cleanName] || 0) + 1;
+        }
+      }
+    } catch {
+      // Skip invalid JSON lines
+    }
+  }
+
+  const sortedCounts = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return { counts: sortedCounts, validLines };
+}
 
 /**
  * Analyzes the database file and returns package counts sorted descending.
@@ -13,26 +45,7 @@ const DEFAULT_DATABASE_PATH = path.join(__dirname, 'database.jsonl');
  */
 export function getPackageCounts(filePath = DEFAULT_DATABASE_PATH) {
   const data = fs.readFileSync(filePath, 'utf8');
-  const lines = data.split('\n');
-  const counts = {};
-
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const obj = JSON.parse(line);
-      if (Array.isArray(obj.modulenotfound)) {
-        for (const module of obj.modulenotfound) {
-          counts[module] = (counts[module] || 0) + 1;
-        }
-      }
-    } catch {
-      // Skip invalid JSON lines
-    }
-  }
-
-  return Object.entries(counts)
-    .map(([key, val]) => [key.replace(/^['"]|['"]$/g, ''), val])
-    .sort((a, b) => b[1] - a[1]);
+  return parseJsonlContent(data).counts;
 }
 
 /**
