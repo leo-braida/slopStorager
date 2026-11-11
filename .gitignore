@@ -156,6 +156,9 @@ vite.config.ts.timestamp-*
 
 # Local datasets & generated outputs
 database.jsonl
+testDataset/
 *.jsonl
 *.csv
 mongo_data/
+
+nextSteps.md

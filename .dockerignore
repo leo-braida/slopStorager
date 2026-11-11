@@ -4,6 +4,7 @@ npm-debug.log
 .gitignore
 .DS_Store
 database.jsonl
+testDataset
 *.csv
 Dockerfile
 docker-compose.yml
