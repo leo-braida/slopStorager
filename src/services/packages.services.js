@@ -1,8 +1,15 @@
-import { ObjectId } from "mongodb";
-import { getPackagesCollection } from "../config/db.js";
+import { query } from "../config/db.js";
 import { validateAndParseWithSchema } from "../utils/schemaParser.js";
 import { checkIfItsPublishable } from "../utils/isPublishable.js";
 import { findSchemaByName, getAllSchemas } from "./schemas.services.js";
+
+const SELECT_PACKAGE_COLUMNS = `
+  id,
+  name,
+  hallucination_counts AS "hallucinationCounts",
+  first_date AS "firstDate",
+  last_date AS "lastDate"
+`;
 
 /**
  * Creates an Error instance with an attached HTTP statusCode.
@@ -19,7 +26,7 @@ function createHttpError(statusCode, message) {
 /**
  * Parses `/packages/:identifier` where identifier is `id={id}` or `name={name}`.
  * @param {string} identifier
- * @returns {Record<string, unknown>}
+ * @returns {{ column: 'id' | 'name', value: number | string }}
  */
 export function parsePackageIdentifier(identifier) {
   if (!identifier) {
@@ -31,10 +38,10 @@ export function parsePackageIdentifier(identifier) {
 
   if (identifier.startsWith("id=")) {
     const rawId = identifier.slice(3).trim();
-    if (!ObjectId.isValid(rawId)) {
+    if (!/^[1-9]\d*$/.test(rawId)) {
       throw createHttpError(400, `Invalid package id "${rawId}".`);
     }
-    return { _id: new ObjectId(rawId) };
+    return { column: "id", value: Number(rawId) };
   }
 
   if (identifier.startsWith("name=")) {
@@ -42,7 +49,7 @@ export function parsePackageIdentifier(identifier) {
     if (!name) {
       throw createHttpError(400, "Package name cannot be empty.");
     }
-    return { name };
+    return { column: "name", value: name };
   }
 
   throw createHttpError(
@@ -87,7 +94,10 @@ export function parseAndValidateDate(
     }
 
     if (startOfDay.getTime() > now.getTime()) {
-      throw createHttpError(400, `Field "${fieldName}" cannot be a future date.`);
+      throw createHttpError(
+        400,
+        `Field "${fieldName}" cannot be a future date.`,
+      );
     }
 
     if (endOfDayIfDateOnly) {
@@ -131,7 +141,7 @@ export function parseMinCount(rawMinCount) {
 }
 
 /**
- * Creates a single package in MongoDB.
+ * Creates a single package in PostgreSQL.
  * Date rules:
  *  - If neither firstDate nor lastDate is passed: both default to new Date().
  *  - If lastDate is passed without firstDate: firstDate = lastDate.
@@ -147,7 +157,10 @@ export async function createPackage(payload) {
 
   const name = typeof payload.name === "string" ? payload.name.trim() : "";
   if (!name) {
-    throw createHttpError(400, 'Field "name" is required and must be a non-empty string.');
+    throw createHttpError(
+      400,
+      'Field "name" is required and must be a non-empty string.',
+    );
   }
 
   let hallucinationCounts = 1;
@@ -164,9 +177,13 @@ export async function createPackage(payload) {
 
   const now = new Date();
   const hasFirstDate =
-    payload.firstDate !== undefined && payload.firstDate !== null && payload.firstDate !== "";
+    payload.firstDate !== undefined &&
+    payload.firstDate !== null &&
+    payload.firstDate !== "";
   const hasLastDate =
-    payload.lastDate !== undefined && payload.lastDate !== null && payload.lastDate !== "";
+    payload.lastDate !== undefined &&
+    payload.lastDate !== null &&
+    payload.lastDate !== "";
 
   let firstDate;
   let lastDate;
@@ -189,29 +206,26 @@ export async function createPackage(payload) {
     throw createHttpError(400, 'Field "firstDate" cannot be after "lastDate".');
   }
 
-  const packagesCol = getPackagesCollection();
-  const existing = await packagesCol.findOne({ name });
-  if (existing) {
+  const existing = await query("SELECT id FROM packages WHERE name = $1", [
+    name,
+  ]);
+  if (existing.rowCount > 0) {
     throw createHttpError(409, `A package with name "${name}" already exists.`);
   }
 
-  const doc = {
-    name,
-    hallucinationCounts,
-    firstDate,
-    lastDate,
-  };
+  const result = await query(
+    `INSERT INTO packages (name, hallucination_counts, first_date, last_date)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${SELECT_PACKAGE_COLUMNS}`,
+    [name, hallucinationCounts, firstDate, lastDate],
+  );
 
-  const result = await packagesCol.insertOne(doc);
-  return {
-    _id: result.insertedId,
-    ...doc,
-  };
+  return result.rows[0];
 }
 
 /**
  * Validates uploaded dataset content against a registered schema (by schemaName or auto-detected)
- * and bulk-upserts package hallucination counts into the database.
+ * and bulk-upserts package hallucination counts into PostgreSQL.
  * @param {{ content: string, schemaName?: string | null }} params
  */
 export async function processPackageUpload({ content, schemaName }) {
@@ -258,27 +272,30 @@ export async function processPackageUpload({ content, schemaName }) {
   }
 
   const { counts, recordsProcessed } = parseResult;
-  const packagesCol = getPackagesCollection();
   const now = new Date();
   let totalHallucinationsAdded = 0;
 
   if (counts.length > 0) {
-    const operations = counts.map(([name, count]) => {
-      totalHallucinationsAdded += count;
-      return {
-        updateOne: {
-          filter: { name },
-          update: {
-            $inc: { hallucinationCounts: count },
-            $set: { lastDate: now },
-            $setOnInsert: { name, firstDate: now },
-          },
-          upsert: true,
-        },
-      };
-    });
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < counts.length; i += BATCH_SIZE) {
+      const slice = counts.slice(i, i + BATCH_SIZE);
+      const values = [];
+      const placeholders = slice.map(([name, count], idx) => {
+        totalHallucinationsAdded += count;
+        const base = idx * 4;
+        values.push(name, count, now, now);
+        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`;
+      });
 
-    await packagesCol.bulkWrite(operations);
+      await query(
+        `INSERT INTO packages (name, hallucination_counts, first_date, last_date)
+         VALUES ${placeholders.join(", ")}
+         ON CONFLICT (name) DO UPDATE
+         SET hallucination_counts = packages.hallucination_counts + EXCLUDED.hallucination_counts,
+             last_date = EXCLUDED.last_date`,
+        values,
+      );
+    }
   }
 
   return {
@@ -295,12 +312,14 @@ export async function processPackageUpload({ content, schemaName }) {
  */
 export async function getPackagesByMinCount(rawMinCount) {
   const minCount = parseMinCount(rawMinCount);
-  const packagesCol = getPackagesCollection();
-
-  return packagesCol
-    .find({ hallucinationCounts: { $gte: minCount } })
-    .sort({ hallucinationCounts: -1, name: 1 })
-    .toArray();
+  const result = await query(
+    `SELECT ${SELECT_PACKAGE_COLUMNS}
+     FROM packages
+     WHERE hallucination_counts >= $1
+     ORDER BY hallucination_counts DESC, name ASC`,
+    [minCount],
+  );
+  return result.rows;
 }
 
 /**
@@ -326,13 +345,15 @@ export async function getPublishablePackagesByMinCount(rawMinCount) {
  * @param {string} identifier
  */
 export async function getPackageByIdentifier(identifier) {
-  const filter = parsePackageIdentifier(identifier);
-  const packagesCol = getPackagesCollection();
-  const pkgDoc = await packagesCol.findOne(filter);
-  if (!pkgDoc) {
+  const { column, value } = parsePackageIdentifier(identifier);
+  const result = await query(
+    `SELECT ${SELECT_PACKAGE_COLUMNS} FROM packages WHERE ${column} = $1`,
+    [value],
+  );
+  if (result.rowCount === 0) {
     throw createHttpError(404, "Package not found.");
   }
-  return pkgDoc;
+  return result.rows[0];
 }
 
 /**
@@ -346,17 +367,12 @@ export async function updatePackageByIdentifier(identifier, payload) {
     throw createHttpError(400, "Request body must be a JSON object.");
   }
 
-  const filter = parsePackageIdentifier(identifier);
-  const packagesCol = getPackagesCollection();
-
-  const existing = await packagesCol.findOne(filter);
-  if (!existing) {
-    throw createHttpError(404, "Package not found.");
-  }
+  const existing = await getPackageByIdentifier(identifier);
 
   let newName = existing.name;
   if (payload.name !== undefined) {
-    const trimmedName = typeof payload.name === "string" ? payload.name.trim() : "";
+    const trimmedName =
+      typeof payload.name === "string" ? payload.name.trim() : "";
     if (!trimmedName) {
       throw createHttpError(400, 'Field "name" cannot be empty.');
     }
@@ -364,8 +380,10 @@ export async function updatePackageByIdentifier(identifier, payload) {
   }
 
   if (newName !== existing.name) {
-    const duplicate = await packagesCol.findOne({ name: newName });
-    if (duplicate) {
+    const duplicate = await query("SELECT id FROM packages WHERE name = $1", [
+      newName,
+    ]);
+    if (duplicate.rowCount > 0) {
       throw createHttpError(
         409,
         `A package with name "${newName}" already exists.`,
@@ -395,11 +413,21 @@ export async function updatePackageByIdentifier(identifier, payload) {
       ? existing.lastDate
       : new Date(existing.lastDate);
 
-  if (payload.firstDate !== undefined && payload.firstDate !== null && payload.firstDate !== "") {
-    newFirstDate = parseAndValidateDate(payload.firstDate, "firstDate", { now });
+  if (
+    payload.firstDate !== undefined &&
+    payload.firstDate !== null &&
+    payload.firstDate !== ""
+  ) {
+    newFirstDate = parseAndValidateDate(payload.firstDate, "firstDate", {
+      now,
+    });
   }
 
-  if (payload.lastDate !== undefined && payload.lastDate !== null && payload.lastDate !== "") {
+  if (
+    payload.lastDate !== undefined &&
+    payload.lastDate !== null &&
+    payload.lastDate !== ""
+  ) {
     newLastDate = parseAndValidateDate(payload.lastDate, "lastDate", { now });
   } else {
     newLastDate = now;
@@ -409,19 +437,15 @@ export async function updatePackageByIdentifier(identifier, payload) {
     throw createHttpError(400, 'Field "firstDate" cannot be after "lastDate".');
   }
 
-  const updatedFields = {
-    name: newName,
-    hallucinationCounts: newCounts,
-    firstDate: newFirstDate,
-    lastDate: newLastDate,
-  };
+  const result = await query(
+    `UPDATE packages
+     SET name = $1, hallucination_counts = $2, first_date = $3, last_date = $4
+     WHERE id = $5
+     RETURNING ${SELECT_PACKAGE_COLUMNS}`,
+    [newName, newCounts, newFirstDate, newLastDate, existing.id],
+  );
 
-  await packagesCol.updateOne({ _id: existing._id }, { $set: updatedFields });
-
-  return {
-    ...existing,
-    ...updatedFields,
-  };
+  return result.rows[0];
 }
 
 /**
@@ -430,17 +454,19 @@ export async function updatePackageByIdentifier(identifier, payload) {
  * Returns `{ deletedCount: number, deletedPackages: string[] }`.
  * @param {{ identifier?: string, query?: Record<string, unknown> }} params
  */
-export async function deletePackages({ identifier, query = {} }) {
+export async function deletePackages({ identifier, query: reqQuery = {} }) {
   let rawLastDate =
-    typeof query.lastDate === "string" && query.lastDate.trim()
-      ? query.lastDate.trim()
+    typeof reqQuery.lastDate === "string" && reqQuery.lastDate.trim()
+      ? reqQuery.lastDate.trim()
       : null;
   let rawName =
-    typeof query.name === "string" && query.name.trim()
-      ? query.name.trim()
+    typeof reqQuery.name === "string" && reqQuery.name.trim()
+      ? reqQuery.name.trim()
       : null;
   let rawId =
-    typeof query.id === "string" && query.id.trim() ? query.id.trim() : null;
+    typeof reqQuery.id === "string" && reqQuery.id.trim()
+      ? reqQuery.id.trim()
+      : null;
 
   if (identifier) {
     if (identifier.startsWith("lastDate=")) {
@@ -457,24 +483,20 @@ export async function deletePackages({ identifier, query = {} }) {
     }
   }
 
-  const packagesCol = getPackagesCollection();
-
   // Case 1: Purge by lastDate (deletes all packages with lastDate <= cutoffDate)
   if (rawLastDate !== null) {
     const cutoffDate = parseAndValidateDate(rawLastDate, "lastDate", {
       endOfDayIfDateOnly: true,
     });
 
-    const filter = { lastDate: { $lte: cutoffDate } };
-    const toDelete = await packagesCol
-      .find(filter, { projection: { _id: 0, name: 1 } })
-      .sort({ name: 1 })
-      .toArray();
+    const result = await query(
+      `DELETE FROM packages
+       WHERE last_date <= $1
+       RETURNING name`,
+      [cutoffDate],
+    );
 
-    const deletedPackages = toDelete.map((doc) => doc.name);
-    if (deletedPackages.length > 0) {
-      await packagesCol.deleteMany({ name: { $in: deletedPackages } });
-    }
+    const deletedPackages = result.rows.map((r) => r.name).sort();
 
     return {
       deletedCount: deletedPackages.length,
@@ -483,14 +505,17 @@ export async function deletePackages({ identifier, query = {} }) {
   }
 
   // Case 2: Delete single package by name (or id)
-  let singleFilter;
+  let column;
+  let value;
   if (rawName) {
-    singleFilter = { name: rawName };
+    column = "name";
+    value = rawName;
   } else if (rawId) {
-    if (!ObjectId.isValid(rawId)) {
+    if (!/^[1-9]\d*$/.test(rawId)) {
       throw createHttpError(400, `Invalid package id "${rawId}".`);
     }
-    singleFilter = { _id: new ObjectId(rawId) };
+    column = "id";
+    value = Number(rawId);
   } else {
     throw createHttpError(
       400,
@@ -498,13 +523,16 @@ export async function deletePackages({ identifier, query = {} }) {
     );
   }
 
-  const deleted = await packagesCol.findOneAndDelete(singleFilter);
-  if (!deleted) {
+  const deleted = await query(
+    `DELETE FROM packages WHERE ${column} = $1 RETURNING name`,
+    [value],
+  );
+  if (deleted.rowCount === 0) {
     throw createHttpError(404, "Package not found.");
   }
 
   return {
     deletedCount: 1,
-    deletedPackages: [deleted.name],
+    deletedPackages: [deleted.rows[0].name],
   };
 }

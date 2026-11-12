@@ -6,20 +6,23 @@ services:
       - "3000:3000"
     environment:
       - PORT=3000
-      - MONGO_URI=mongodb://mongo:27017/slopstorager
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/slopstorager
     depends_on:
-      - mongo
+      - postgres
     restart: unless-stopped
 
-  mongo:
-    image: mongo:7
-    container_name: slopstorager-mongo
+  postgres:
+    image: postgres:16-alpine
+    container_name: slopstorager-postgres
     ports:
-      - "27017:27017"
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=slopstorager
     volumes:
-      - mongo_data:/data/db
+      - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
-  mongo_data:
-
+  postgres_data:

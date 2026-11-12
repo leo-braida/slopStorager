@@ -1,39 +1,64 @@
-import { MongoClient } from 'mongodb';
+import pg from "pg";
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://mongo:27017/slopstorager';
-const DB_NAME = process.env.MONGO_DB_NAME || 'slopstorager';
-const PACKAGES_COLLECTION = 'packages';
-const SCHEMAS_COLLECTION = 'schemas';
+const { Pool } = pg;
 
-let client;
-let db;
+const DATABASE_URL =
+  process.env.DATABASE_URL ||
+  "postgresql://postgres:postgres@postgres:5432/slopstorager";
+
+let pool = null;
+
+const INIT_DDL = `
+CREATE TABLE IF NOT EXISTS packages (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  hallucination_counts INTEGER NOT NULL DEFAULT 1 CHECK (hallucination_counts >= 0),
+  first_date TIMESTAMPTZ NOT NULL,
+  last_date TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_packages_hallucination_counts
+  ON packages (hallucination_counts DESC, name ASC);
+
+CREATE INDEX IF NOT EXISTS idx_packages_last_date
+  ON packages (last_date);
+
+CREATE TABLE IF NOT EXISTS schemas (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  format VARCHAR(10) NOT NULL CHECK (format IN ('CSV', 'JSON')),
+  schema JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`;
 
 /**
- * Connects to MongoDB with retry logic and ensures indexes on packages and schemas collections.
- * @param {number} [retries=10]
+ * Connects to PostgreSQL with retry logic and initializes the database schema.
+ * @param {number} [retries=15]
  * @param {number} [delayMs=2000]
- * @returns {Promise<import('mongodb').Db>}
+ * @returns {Promise<import('pg').Pool>}
  */
-export async function connectDB(retries = 10, delayMs = 2000) {
-  if (db) return db;
+export async function connectDB(retries = 15, delayMs = 2000) {
+  if (pool) return pool;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
+    const candidatePool = new Pool({ connectionString: DATABASE_URL });
     try {
-      client = new MongoClient(MONGO_URI);
-      await client.connect();
-      db = client.db(DB_NAME);
-
-      const packagesCol = db.collection(PACKAGES_COLLECTION);
-      await packagesCol.createIndex({ name: 1 }, { unique: true });
-      await packagesCol.createIndex({ hallucinationCounts: -1 });
-
-      const schemasCol = db.collection(SCHEMAS_COLLECTION);
-      await schemasCol.createIndex({ name: 1 }, { unique: true });
-
-      console.log(`Connected to MongoDB at ${MONGO_URI}`);
-      return db;
+      const client = await candidatePool.connect();
+      try {
+        await client.query(INIT_DDL);
+      } finally {
+        client.release();
+      }
+      pool = candidatePool;
+      console.log(`Connected to PostgreSQL and verified schema tables.`);
+      return pool;
     } catch (err) {
-      console.warn(`MongoDB connection attempt ${attempt}/${retries} failed: ${err.message}`);
+      await candidatePool.end().catch(() => {});
+      console.warn(
+        `PostgreSQL connection attempt ${attempt}/${retries} failed: ${err.message}`,
+      );
       if (attempt === retries) {
         throw err;
       }
@@ -43,34 +68,32 @@ export async function connectDB(retries = 10, delayMs = 2000) {
 }
 
 /**
- * Returns the MongoDB 'packages' collection.
- * @returns {import('mongodb').Collection}
+ * Returns the initialized PostgreSQL connection pool.
+ * @returns {import('pg').Pool}
  */
-export function getPackagesCollection() {
-  if (!db) {
-    throw new Error('Database not initialized. Call connectDB() first.');
+export function getPool() {
+  if (!pool) {
+    throw new Error("Database not initialized. Call connectDB() first.");
   }
-  return db.collection(PACKAGES_COLLECTION);
+  return pool;
 }
 
 /**
- * Returns the MongoDB 'schemas' collection.
- * @returns {import('mongodb').Collection}
+ * Executes a parameterized SQL query on the pool.
+ * @param {string} text
+ * @param {unknown[]} [params]
+ * @returns {Promise<import('pg').QueryResult>}
  */
-export function getSchemasCollection() {
-  if (!db) {
-    throw new Error('Database not initialized. Call connectDB() first.');
-  }
-  return db.collection(SCHEMAS_COLLECTION);
+export function query(text, params) {
+  return getPool().query(text, params);
 }
 
 /**
- * Closes the MongoDB client connection.
+ * Closes the PostgreSQL connection pool.
  */
 export async function closeDB() {
-  if (client) {
-    await client.close();
-    client = null;
-    db = null;
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }

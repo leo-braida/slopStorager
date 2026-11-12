@@ -13,8 +13,8 @@
   "license": "ISC",
   "dependencies": {
     "express": "^5.1.0",
-    "mongodb": "^6.16.0",
     "multer": "^2.0.0",
-    "npm-name": "^8.1.1"
+    "npm-name": "^8.1.1",
+    "pg": "^8.23.1"
   }
 }

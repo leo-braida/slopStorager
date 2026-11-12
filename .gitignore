@@ -159,6 +159,6 @@ database.jsonl
 testDataset/
 *.jsonl
 *.csv
-mongo_data/
+postgres_data/
 
 nextSteps.md
