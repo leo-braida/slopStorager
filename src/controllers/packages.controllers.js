@@ -1,8 +1,33 @@
 import {
+  createPackage,
   processPackageUpload,
   getPackagesByMinCount,
   getPublishablePackagesByMinCount,
+  getPackageByIdentifier,
+  updatePackageByIdentifier,
+  deletePackages,
 } from "../services/packages.services.js";
+
+/**
+ * POST /packages
+ */
+export async function createPackageController(req, res) {
+  try {
+    const pkg = await createPackage(req.body);
+    return res.status(201).json({
+      message: "Package created successfully.",
+      package: pkg,
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    console.error("Error in POST /packages:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error while creating package." });
+  }
+}
 
 /**
  * POST /packages/upload
@@ -81,5 +106,71 @@ export async function getPublishablePackagesController(req, res) {
     return res.status(500).json({
       error: "Internal server error while checking publishable packages.",
     });
+  }
+}
+
+/**
+ * GET /packages/:identifier
+ */
+export async function getPackageByIdentifierController(req, res) {
+  try {
+    const pkg = await getPackageByIdentifier(req.params.identifier);
+    return res.status(200).json(pkg);
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    console.error("Error in GET /packages/:identifier:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error while fetching package." });
+  }
+}
+
+/**
+ * PUT /packages/:identifier
+ */
+export async function updatePackageController(req, res) {
+  try {
+    const pkg = await updatePackageByIdentifier(
+      req.params.identifier,
+      req.body,
+    );
+    return res.status(200).json({
+      message: "Package updated successfully.",
+      package: pkg,
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    console.error("Error in PUT /packages/:identifier:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error while updating package." });
+  }
+}
+
+/**
+ * DELETE /packages or DELETE /packages/:identifier
+ */
+export async function deletePackagesController(req, res) {
+  try {
+    const result = await deletePackages({
+      identifier: req.params.identifier,
+      query: req.query,
+    });
+    return res.status(200).json({
+      message: "Package(s) deleted successfully.",
+      ...result,
+    });
+  } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    console.error("Error in DELETE /packages:", error);
+    return res
+      .status(500)
+      .json({ error: "Internal server error while deleting package(s)." });
   }
 }
