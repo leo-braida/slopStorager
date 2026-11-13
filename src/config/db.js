@@ -68,6 +68,14 @@ export async function connectDB(retries = 15, delayMs = 2000) {
 }
 
 /**
+ * Overrides the active PostgreSQL connection pool (used in unit/endpoint tests).
+ * @param { { query: (text: string, params?: unknown[]) => Promise<unknown>, end?: () => Promise<void> } | null } customPool
+ */
+export function setPool(customPool) {
+  pool = customPool;
+}
+
+/**
  * Returns the initialized PostgreSQL connection pool.
  * @returns {import('pg').Pool}
  */

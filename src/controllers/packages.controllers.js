@@ -1,10 +1,9 @@
 import {
   createPackage,
   processPackageUpload,
-  getPackagesByMinCount,
+  getPackages,
   getPublishablePackagesByMinCount,
-  getPackageByIdentifier,
-  updatePackageByIdentifier,
+  updatePackageByQuery,
   deletePackages,
 } from "../services/packages.services.js";
 
@@ -74,12 +73,12 @@ export async function uploadPackagesController(req, res) {
 }
 
 /**
- * GET /packages
+ * GET /packages (list via ?minCount=, or single package via ?id={id} / ?name={name})
  */
 export async function getPackagesController(req, res) {
   try {
-    const packages = await getPackagesByMinCount(req.query.minCount);
-    return res.status(200).json(packages);
+    const result = await getPackages(req.query);
+    return res.status(200).json(result);
   } catch (error) {
     if (error.statusCode) {
       return res.status(error.statusCode).json({ error: error.message });
@@ -110,32 +109,11 @@ export async function getPublishablePackagesController(req, res) {
 }
 
 /**
- * GET /packages/:identifier
- */
-export async function getPackageByIdentifierController(req, res) {
-  try {
-    const pkg = await getPackageByIdentifier(req.params.identifier);
-    return res.status(200).json(pkg);
-  } catch (error) {
-    if (error.statusCode) {
-      return res.status(error.statusCode).json({ error: error.message });
-    }
-    console.error("Error in GET /packages/:identifier:", error);
-    return res
-      .status(500)
-      .json({ error: "Internal server error while fetching package." });
-  }
-}
-
-/**
- * PUT /packages/:identifier
+ * PUT /packages?id={id} or PUT /packages?name={name}
  */
 export async function updatePackageController(req, res) {
   try {
-    const pkg = await updatePackageByIdentifier(
-      req.params.identifier,
-      req.body,
-    );
+    const pkg = await updatePackageByQuery(req.query, req.body);
     return res.status(200).json({
       message: "Package updated successfully.",
       package: pkg,
@@ -144,7 +122,7 @@ export async function updatePackageController(req, res) {
     if (error.statusCode) {
       return res.status(error.statusCode).json({ error: error.message });
     }
-    console.error("Error in PUT /packages/:identifier:", error);
+    console.error("Error in PUT /packages:", error);
     return res
       .status(500)
       .json({ error: "Internal server error while updating package." });
@@ -152,14 +130,11 @@ export async function updatePackageController(req, res) {
 }
 
 /**
- * DELETE /packages or DELETE /packages/:identifier
+ * DELETE /packages?lastDate={YYYY-MM-DD}, DELETE /packages?name={name}, or DELETE /packages?id={id}
  */
 export async function deletePackagesController(req, res) {
   try {
-    const result = await deletePackages({
-      identifier: req.params.identifier,
-      query: req.query,
-    });
+    const result = await deletePackages(req.query);
     return res.status(200).json({
       message: "Package(s) deleted successfully.",
       ...result,

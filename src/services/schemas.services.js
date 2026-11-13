@@ -1,5 +1,6 @@
 import { query } from "../config/db.js";
 import { validateSchemaDefinition } from "../utils/schemaParser.js";
+import { createHttpError, parseIdOrNameQuery } from "../utils/querySelector.js";
 
 const SELECT_SCHEMA_COLUMNS = `
   id,
@@ -9,53 +10,6 @@ const SELECT_SCHEMA_COLUMNS = `
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 `;
-
-/**
- * Creates an Error instance with an attached HTTP statusCode.
- * @param {number} statusCode
- * @param {string} message
- * @returns {Error & { statusCode: number }}
- */
-function createHttpError(statusCode, message) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
-}
-
-/**
- * Parses `/schemas/:identifier` where identifier is `id={id}` or `name={name}`.
- * @param {string} identifier
- * @returns {{ column: 'id' | 'name', value: number | string }}
- */
-export function parseSchemaIdentifier(identifier) {
-  if (!identifier) {
-    throw createHttpError(
-      400,
-      "Schema identifier is required (use id={id} or name={name}).",
-    );
-  }
-
-  if (identifier.startsWith("id=")) {
-    const rawId = identifier.slice(3).trim();
-    if (!/^[1-9]\d*$/.test(rawId)) {
-      throw createHttpError(400, `Invalid schema id "${rawId}".`);
-    }
-    return { column: "id", value: Number(rawId) };
-  }
-
-  if (identifier.startsWith("name=")) {
-    const name = decodeURIComponent(identifier.slice(5).trim());
-    if (!name) {
-      throw createHttpError(400, "Schema name cannot be empty.");
-    }
-    return { column: "name", value: name };
-  }
-
-  throw createHttpError(
-    400,
-    "Invalid schema selector. Use /schemas/id={id} or /schemas/name={name}.",
-  );
-}
 
 /**
  * Creates and persists a new schema in PostgreSQL.
@@ -98,19 +52,39 @@ export async function getAllSchemas() {
 }
 
 /**
- * Retrieves a single schema by `id={id}` or `name={name}` identifier.
- * @param {string} identifier
+ * Retrieves a single schema using `{ column, value }` selector.
+ * @param {{ column: 'id' | 'name', value: number | string }} selector
  */
-export async function getSchemaByIdentifier(identifier) {
-  const { column, value } = parseSchemaIdentifier(identifier);
+async function getSchemaBySelector(selector) {
   const result = await query(
-    `SELECT ${SELECT_SCHEMA_COLUMNS} FROM schemas WHERE ${column} = $1`,
-    [value],
+    `SELECT ${SELECT_SCHEMA_COLUMNS} FROM schemas WHERE ${selector.column} = $1`,
+    [selector.value],
   );
   if (result.rowCount === 0) {
     throw createHttpError(404, "Schema not found.");
   }
   return result.rows[0];
+}
+
+/**
+ * Retrieves either a single schema (`?id=` / `?name=`) or all schemas if no selector is passed.
+ * @param {Record<string, unknown>} [reqQuery]
+ */
+export async function getSchemas(reqQuery = {}) {
+  const selector = parseIdOrNameQuery(reqQuery, "Schema", { required: false });
+  if (selector) {
+    return getSchemaBySelector(selector);
+  }
+  return getAllSchemas();
+}
+
+/**
+ * Retrieves a single schema by `?id={id}` or `?name={name}` query parameter.
+ * @param {Record<string, unknown>} reqQuery
+ */
+export async function getSchemaByQuery(reqQuery) {
+  const selector = parseIdOrNameQuery(reqQuery, "Schema", { required: true });
+  return getSchemaBySelector(selector);
 }
 
 /**
@@ -126,12 +100,12 @@ export async function findSchemaByName(name) {
 }
 
 /**
- * Updates an existing schema identified by `id={id}` or `name={name}`.
- * @param {string} identifier
+ * Updates an existing schema identified by `?id={id}` or `?name={name}` query parameter.
+ * @param {Record<string, unknown>} reqQuery
  * @param {{ format?: string, schema?: unknown, name?: string }} payload
  */
-export async function updateSchemaByIdentifier(identifier, payload) {
-  const existing = await getSchemaByIdentifier(identifier);
+export async function updateSchemaByQuery(reqQuery, payload) {
+  const existing = await getSchemaByQuery(reqQuery);
 
   const mergedPayload = {
     format: payload?.format !== undefined ? payload.format : existing.format,
@@ -174,14 +148,14 @@ export async function updateSchemaByIdentifier(identifier, payload) {
 }
 
 /**
- * Deletes a schema identified by `id={id}` or `name={name}`.
- * @param {string} identifier
+ * Deletes a schema identified by `?id={id}` or `?name={name}` query parameter.
+ * @param {Record<string, unknown>} reqQuery
  */
-export async function deleteSchemaByIdentifier(identifier) {
-  const { column, value } = parseSchemaIdentifier(identifier);
+export async function deleteSchemaByQuery(reqQuery) {
+  const selector = parseIdOrNameQuery(reqQuery, "Schema", { required: true });
   const result = await query(
-    `DELETE FROM schemas WHERE ${column} = $1 RETURNING ${SELECT_SCHEMA_COLUMNS}`,
-    [value],
+    `DELETE FROM schemas WHERE ${selector.column} = $1 RETURNING ${SELECT_SCHEMA_COLUMNS}`,
+    [selector.value],
   );
   if (result.rowCount === 0) {
     throw createHttpError(404, "Schema not found.");

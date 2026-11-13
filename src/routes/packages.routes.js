@@ -6,7 +6,6 @@ import {
   uploadPackagesController,
   getPackagesController,
   getPublishablePackagesController,
-  getPackageByIdentifierController,
   updatePackageController,
   deletePackagesController,
 } from "../controllers/packages.controllers.js";
@@ -25,9 +24,7 @@ router.post("/upload", upload.any(), textParser, uploadPackagesController);
 router.post("/", jsonParser, createPackageController);
 router.get("/", getPackagesController);
 router.get("/publishable", getPublishablePackagesController);
-router.get("/:identifier", getPackageByIdentifierController);
-router.put("/:identifier", jsonParser, updatePackageController);
+router.put("/", jsonParser, updatePackageController);
 router.delete("/", deletePackagesController);
-router.delete("/:identifier", deletePackagesController);
 
 export default router;

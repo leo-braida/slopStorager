@@ -1,7 +1,15 @@
 import { query } from "../config/db.js";
 import { validateAndParseWithSchema } from "../utils/schemaParser.js";
 import { checkIfItsPublishable } from "../utils/isPublishable.js";
+import {
+  createHttpError,
+  parseIdOrNameQuery,
+  parseAndValidateDate,
+  parseMinCount,
+} from "../utils/querySelector.js";
 import { findSchemaByName, getAllSchemas } from "./schemas.services.js";
+
+export { parseAndValidateDate, parseMinCount };
 
 const SELECT_PACKAGE_COLUMNS = `
   id,
@@ -10,135 +18,6 @@ const SELECT_PACKAGE_COLUMNS = `
   first_date AS "firstDate",
   last_date AS "lastDate"
 `;
-
-/**
- * Creates an Error instance with an attached HTTP statusCode.
- * @param {number} statusCode
- * @param {string} message
- * @returns {Error & { statusCode: number }}
- */
-function createHttpError(statusCode, message) {
-  const err = new Error(message);
-  err.statusCode = statusCode;
-  return err;
-}
-
-/**
- * Parses `/packages/:identifier` where identifier is `id={id}` or `name={name}`.
- * @param {string} identifier
- * @returns {{ column: 'id' | 'name', value: number | string }}
- */
-export function parsePackageIdentifier(identifier) {
-  if (!identifier) {
-    throw createHttpError(
-      400,
-      "Package identifier is required (use id={id} or name={name}).",
-    );
-  }
-
-  if (identifier.startsWith("id=")) {
-    const rawId = identifier.slice(3).trim();
-    if (!/^[1-9]\d*$/.test(rawId)) {
-      throw createHttpError(400, `Invalid package id "${rawId}".`);
-    }
-    return { column: "id", value: Number(rawId) };
-  }
-
-  if (identifier.startsWith("name=")) {
-    const name = decodeURIComponent(identifier.slice(5).trim());
-    if (!name) {
-      throw createHttpError(400, "Package name cannot be empty.");
-    }
-    return { column: "name", value: name };
-  }
-
-  throw createHttpError(
-    400,
-    "Invalid package selector. Use /packages/id={id} or /packages/name={name}.",
-  );
-}
-
-/**
- * Parses and validates an ISO 8601 date string (`YYYY-MM-DD` or full ISO timestamp).
- * Ensures the date is not in the future.
- * @param {unknown} rawDate
- * @param {string} fieldName
- * @param {{ endOfDayIfDateOnly?: boolean, now?: Date }} [options]
- * @returns {Date}
- */
-export function parseAndValidateDate(
-  rawDate,
-  fieldName,
-  { endOfDayIfDateOnly = false, now = new Date() } = {},
-) {
-  if (typeof rawDate !== "string" || !rawDate.trim()) {
-    throw createHttpError(
-      400,
-      `Field "${fieldName}" must be a valid ISO 8601 date string (e.g. YYYY-MM-DD).`,
-    );
-  }
-
-  const trimmed = rawDate.trim();
-  const dateOnlyMatch = /^\d{4}-\d{2}-\d{2}$/.test(trimmed);
-
-  if (dateOnlyMatch) {
-    const startOfDay = new Date(`${trimmed}T00:00:00.000Z`);
-    if (
-      Number.isNaN(startOfDay.getTime()) ||
-      startOfDay.toISOString().slice(0, 10) !== trimmed
-    ) {
-      throw createHttpError(
-        400,
-        `Field "${fieldName}" is not a valid calendar date (expected YYYY-MM-DD).`,
-      );
-    }
-
-    if (startOfDay.getTime() > now.getTime()) {
-      throw createHttpError(
-        400,
-        `Field "${fieldName}" cannot be a future date.`,
-      );
-    }
-
-    if (endOfDayIfDateOnly) {
-      return new Date(`${trimmed}T23:59:59.999Z`);
-    }
-    return startOfDay;
-  }
-
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) {
-    throw createHttpError(
-      400,
-      `Field "${fieldName}" must be a valid ISO 8601 date string (e.g. YYYY-MM-DD).`,
-    );
-  }
-
-  if (parsed.getTime() > now.getTime()) {
-    throw createHttpError(400, `Field "${fieldName}" cannot be a future date.`);
-  }
-
-  return parsed;
-}
-
-/**
- * Parses and validates the `minCount` query parameter.
- * @param {unknown} rawMinCount
- * @returns {number}
- */
-export function parseMinCount(rawMinCount) {
-  if (rawMinCount === undefined || rawMinCount === "") {
-    return 1;
-  }
-  const parsed = Number(rawMinCount);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    throw createHttpError(
-      400,
-      'Query parameter "minCount" must be a non-negative number.',
-    );
-  }
-  return Math.floor(parsed);
-}
 
 /**
  * Creates a single package in PostgreSQL.
@@ -341,14 +220,13 @@ export async function getPublishablePackagesByMinCount(rawMinCount) {
 }
 
 /**
- * Retrieves a single package by `id={id}` or `name={name}` identifier.
- * @param {string} identifier
+ * Retrieves a single package using `{ column, value }` selector.
+ * @param {{ column: 'id' | 'name', value: number | string }} selector
  */
-export async function getPackageByIdentifier(identifier) {
-  const { column, value } = parsePackageIdentifier(identifier);
+async function getPackageBySelector(selector) {
   const result = await query(
-    `SELECT ${SELECT_PACKAGE_COLUMNS} FROM packages WHERE ${column} = $1`,
-    [value],
+    `SELECT ${SELECT_PACKAGE_COLUMNS} FROM packages WHERE ${selector.column} = $1`,
+    [selector.value],
   );
   if (result.rowCount === 0) {
     throw createHttpError(404, "Package not found.");
@@ -357,17 +235,41 @@ export async function getPackageByIdentifier(identifier) {
 }
 
 /**
- * Updates an existing package identified by `id={id}` or `name={name}`.
+ * Retrieves packages matching `?minCount=` or a single package via `?id={id}` / `?name={name}`.
+ * @param {Record<string, unknown>} [reqQuery]
+ */
+export async function getPackages(reqQuery = {}) {
+  const selector = parseIdOrNameQuery(reqQuery, "Package", { required: false });
+  if (selector) {
+    if (reqQuery.minCount !== undefined) {
+      throw createHttpError(400, 'Cannot combine "minCount" with "id" or "name".');
+    }
+    return getPackageBySelector(selector);
+  }
+  return getPackagesByMinCount(reqQuery.minCount);
+}
+
+/**
+ * Retrieves a single package by `?id={id}` or `?name={name}` query parameter.
+ * @param {Record<string, unknown>} reqQuery
+ */
+export async function getPackageByQuery(reqQuery) {
+  const selector = parseIdOrNameQuery(reqQuery, "Package", { required: true });
+  return getPackageBySelector(selector);
+}
+
+/**
+ * Updates an existing package identified by `?id={id}` or `?name={name}` query parameter.
  * Enforces date rules (no future dates, firstDate <= lastDate).
- * @param {string} identifier
+ * @param {Record<string, unknown>} reqQuery
  * @param {{ name?: string, hallucinationCounts?: unknown, firstDate?: string, lastDate?: string }} payload
  */
-export async function updatePackageByIdentifier(identifier, payload) {
+export async function updatePackageByQuery(reqQuery, payload) {
   if (!payload || typeof payload !== "object") {
     throw createHttpError(400, "Request body must be a JSON object.");
   }
 
-  const existing = await getPackageByIdentifier(identifier);
+  const existing = await getPackageByQuery(reqQuery);
 
   let newName = existing.name;
   if (payload.name !== undefined) {
@@ -449,43 +351,25 @@ export async function updatePackageByIdentifier(identifier, payload) {
 }
 
 /**
- * Deletes packages by `lastDate` (purging all packages with lastDate <= cutoffDate)
- * or deletes a single package by `name` (or `id`) if `lastDate` is not provided.
+ * Deletes packages by `?lastDate={YYYY-MM-DD}` (purging all packages with lastDate <= cutoffDate)
+ * or deletes a single package by `?name={name}` or `?id={id}`.
  * Returns `{ deletedCount: number, deletedPackages: string[] }`.
- * @param {{ identifier?: string, query?: Record<string, unknown> }} params
+ * @param {Record<string, unknown>} [reqQuery]
  */
-export async function deletePackages({ identifier, query: reqQuery = {} }) {
-  let rawLastDate =
-    typeof reqQuery.lastDate === "string" && reqQuery.lastDate.trim()
-      ? reqQuery.lastDate.trim()
-      : null;
-  let rawName =
-    typeof reqQuery.name === "string" && reqQuery.name.trim()
-      ? reqQuery.name.trim()
-      : null;
-  let rawId =
-    typeof reqQuery.id === "string" && reqQuery.id.trim()
-      ? reqQuery.id.trim()
-      : null;
+export async function deletePackages(reqQuery = {}) {
+  const hasLastDate = reqQuery?.lastDate !== undefined;
+  const selector = parseIdOrNameQuery(reqQuery, "Package", { required: false });
 
-  if (identifier) {
-    if (identifier.startsWith("lastDate=")) {
-      rawLastDate = decodeURIComponent(identifier.slice(9).trim());
-    } else if (identifier.startsWith("name=")) {
-      rawName = decodeURIComponent(identifier.slice(5).trim());
-    } else if (identifier.startsWith("id=")) {
-      rawId = identifier.slice(3).trim();
-    } else {
-      throw createHttpError(
-        400,
-        "Invalid delete selector. Use lastDate={YYYY-MM-DD}, name={name}, or id={id}.",
-      );
-    }
+  if (hasLastDate && selector) {
+    throw createHttpError(
+      400,
+      'Provide either "lastDate" or a single selector ("id" or "name"), not both.',
+    );
   }
 
   // Case 1: Purge by lastDate (deletes all packages with lastDate <= cutoffDate)
-  if (rawLastDate !== null) {
-    const cutoffDate = parseAndValidateDate(rawLastDate, "lastDate", {
+  if (hasLastDate) {
+    const cutoffDate = parseAndValidateDate(reqQuery.lastDate, "lastDate", {
       endOfDayIfDateOnly: true,
     });
 
@@ -505,27 +389,16 @@ export async function deletePackages({ identifier, query: reqQuery = {} }) {
   }
 
   // Case 2: Delete single package by name (or id)
-  let column;
-  let value;
-  if (rawName) {
-    column = "name";
-    value = rawName;
-  } else if (rawId) {
-    if (!/^[1-9]\d*$/.test(rawId)) {
-      throw createHttpError(400, `Invalid package id "${rawId}".`);
-    }
-    column = "id";
-    value = Number(rawId);
-  } else {
+  if (!selector) {
     throw createHttpError(
       400,
-      'Must provide either "lastDate" (ISO 8601 YYYY-MM-DD) or "name" to delete packages.',
+      'Must provide either "lastDate" (ISO 8601 YYYY-MM-DD), "id", or "name" to delete packages.',
     );
   }
 
   const deleted = await query(
-    `DELETE FROM packages WHERE ${column} = $1 RETURNING name`,
-    [value],
+    `DELETE FROM packages WHERE ${selector.column} = $1 RETURNING name`,
+    [selector.value],
   );
   if (deleted.rowCount === 0) {
     throw createHttpError(404, "Package not found.");

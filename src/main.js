@@ -21,6 +21,8 @@ async function startServer() {
   }
 }
 
-startServer();
+if (process.env.NODE_ENV !== "test" && !process.env.NODE_TEST_CONTEXT) {
+  startServer();
+}
 
 export { app };
